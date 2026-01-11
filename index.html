@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Walkie-Talkie</title>
+    <style>
+        body {
+            background: #0f172a;
+            color: #e5e7eb;
+            font-family: Segoe UI, Arial;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .card {
+            width: 420px;
+            background: #020617;
+            padding: 25px;
+            border-radius: 14px;
+        }
+
+        input,
+        button {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            border: none;
+        }
+
+        button {
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .join {
+            background: #2563eb;
+            color: white;
+        }
+
+        .call {
+            background: #374151;
+            color: white;
+        }
+
+        .ptt {
+            background: #16a34a;
+            color: white;
+        }
+
+        .end {
+            background: #dc2626;
+            color: white;
+        }
+
+        #incoming {
+            display: none;
+            background: #1e293b;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+
+        #status {
+            font-size: 14px;
+            color: #9ca3af;
+            text-align: center;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+
+        <input id="username" placeholder="Your username">
+        <input id="room" placeholder="Lobby room">
+        <button class="join" id="join">Join</button>
+
+        <input id="friend" placeholder="Friend username">
+        <button class="call" id="call">Call</button>
+
+        <div id="incoming">
+            Incoming call from <b id="caller"></b>
+            <button id="accept">Accept</button>
+        </div>
+
+        <button class="ptt" id="ptt" disabled>Hold To Talk</button>
+        <button class="end" id="end" disabled>End Call</button>
+
+        <div id="status">Idle</div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("https://siddheshnild.github.io/talk-1/");
+        const status = document.getElementById("status");
+
+        let pc;
+        let localStream;
+        let inCall = false;
+        let callWith = "";
+        let talkingUser = null;
+
+        function createPeer() {
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+            });
+
+            pc.onicecandidate = e => {
+                if (e.candidate) {
+                    ws.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
+                }
+            };
+
+            pc.ontrack = e => {
+                const audio = document.createElement("audio");
+                audio.srcObject = e.streams[0];
+                audio.autoplay = true;
+            };
+        }
+
+        function cleanupCall() {
+            if (pc) pc.close();
+            pc = null;
+
+            if (localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+            }
+
+            ptt.disabled = true;
+            end.disabled = true;
+            inCall = false;
+            talkingUser = null;
+            status.innerText = "Call ended";
+        }
+
+        ws.onmessage = async e => {
+            const msg = JSON.parse(e.data);
+
+            if (msg.type === "incoming-call") {
+                incoming.style.display = "block";
+                caller.innerText = msg.from;
+                callWith = msg.from;
+            }
+
+            if (msg.type === "call-started") {
+                incoming.style.display = "none";
+                createPeer();
+                inCall = true;
+                ptt.disabled = false;
+                end.disabled = false;
+                status.innerText = "In call";
+            }
+
+            if (msg.type === "talking") {
+                talkingUser = msg.user;
+                status.innerText = `${msg.user} is talking`;
+                ptt.disabled = msg.user !== username.value;
+            }
+
+            if (msg.type === "stopped-talking") {
+                talkingUser = null;
+                status.innerText = "In call";
+                ptt.disabled = false;
+            }
+
+            if (msg.type === "offer") {
+                await pc.setRemoteDescription(msg.offer);
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                ws.send(JSON.stringify({ type: "answer", answer }));
+            }
+
+            if (msg.type === "answer") {
+                await pc.setRemoteDescription(msg.answer);
+            }
+
+            if (msg.type === "ice") {
+                await pc.addIceCandidate(msg.candidate);
+            }
+
+            if (msg.type === "call-ended") cleanupCall();
+        };
+
+        join.onclick = () => {
+            ws.send(JSON.stringify({
+                type: "join",
+                username: username.value,
+                room: room.value
+            }));
+            status.innerText = "Joined lobby";
+        };
+
+        call.onclick = () => {
+            ws.send(JSON.stringify({ type: "call", to: friend.value }));
+            status.innerText = "Calling...";
+        };
+
+        accept.onclick = () => {
+            ws.send(JSON.stringify({ type: "accept-call", with: callWith }));
+        };
+
+        ptt.onmousedown = async () => {
+            if (!inCall || talkingUser) return;
+
+            ws.send(JSON.stringify({ type: "talking" }));
+
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({ type: "offer", offer }));
+
+            status.innerText = "You are talking";
+        };
+
+        ptt.onmouseup = () => {
+            ws.send(JSON.stringify({ type: "stopped-talking" }));
+            if (localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+            }
+        };
+
+        end.onclick = () => {
+            ws.send(JSON.stringify({ type: "end-call" }));
+            cleanupCall();
+        };
+    </script>
+</body>
+
+</html>
